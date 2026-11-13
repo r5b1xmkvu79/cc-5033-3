@@ -60,9 +60,10 @@ N 个隔行帧、帧率 F 对应 2N 个场，场速率 2F。时间戳只由采�
 python3 -m pip install -r requirements.txt
 ```
 
-## 6. 如何启动界面
+## 6. 如何启动界面（档案去交错的图形入口）
 
-在仓库根目录（`/workspace`）执行：
+档案去交错以 **Web 影像校正界面为主入口**，命令行只用于批处理与基准。在仓库
+根目录（`/workspace`）执行：
 
 ```bash
 python3 -m archive_deinterlacer serve --host 127.0.0.1 --port 8000 --workdir output/web
@@ -71,15 +72,17 @@ python3 -m archive_deinterlacer serve --host 127.0.0.1 --port 8000 --workdir out
 然后浏览器打开 <http://127.0.0.1:8000>。操作流程：
 
 1. 上传隔行视频，自动解码并给出诊断（容器声明 vs 内容分析）；
-2. 显式选择场序（TFF/BFF）与重建策略，可调运动阈值；
+2. 在界面上**实际选择场序**（TFF/BFF）与重建策略，可调运动阈值；内核不接受
+   无场序请求，缺场序会在状态区直接提示拒绝原因；
 3. 运行后逐帧对照三栏：**原始隔行帧 / 单场视图 / 最终重建帧**，重建帧可勾选
-   “叠加运动边缘”；
+   “叠加运动边缘”；切换 TFF/BFF 时单场视图复用已分离的场行，不重新复制像素；
 4. 时间信息栏显示每帧时间戳、来源场及其位置与采样时刻、帧率/帧数/时长一致性；
 5. 下载真实导出的逐行 MP4 与时间戳清单 JSON。
 
-内核拒绝（无场序、逐行输入、奇数高度等）会直接显示在页面状态区。
+运动边缘与重建帧均来自内核的实际运算结果，界面只做编排与渲染；内核拒绝
+（无场序、逐行输入、奇数高度等）会作为结构化异常直接显示在页面状态区。
 
-## 7. 命令行用法
+## 7. 命令行用法（仅辅助图形界面）
 
 ```bash
 # 生成合成参考素材（横向移动条纹、细字、斜线、静止图案），含逐行真值与 TFF/BFF 隔行片
@@ -93,6 +96,9 @@ python3 -m archive_deinterlacer deinterlace input.mp4 --field-order tff --mode a
 
 # 对三种模式 + 模糊基线做量化基准（运动平滑/梳齿残留/细节损失）
 python3 -m archive_deinterlacer benchmark --out output/benchmark
+
+# 场处理加速 A/B：分阶段成本分解、梳齿误差、每帧成本与逐像素一致性校验
+python3 -m archive_deinterlacer perf --out output/perf
 ```
 
 ## 8. 基准指标如何对应需求
@@ -106,27 +112,73 @@ python3 -m archive_deinterlacer benchmark --out output/benchmark
 实测（合成素材，TFF/BFF 结论一致）：weave 细节 0 dB 但运动区梳齿最高；adaptive
 细节约 -0.07 dB 且梳齿远低于 weave；模糊基线以约 -3.2 dB 的细节损失换取低梳齿。
 
-## 9. 目录结构
+## 9. 场处理加速：计算顺序、成本分解与回退准则
+
+加速只改**成本**，不改判定与像素。变更前的完整行为冻结在
+`core/legacy.py`，性能集与测试对两条路径做逐帧逐像素、运动掩膜、时间戳比对。
+
+### 9.1 消除的重复计算（按执行顺序）
+
+1. **场分离一次、行信息复用**：TFF/BFF 评估原本各自把每场行复制一遍。现在
+   `fields.split_fields_reusable` 每个隔行帧只分离一次，BFF 用同一份行数组
+   重标采样序号；诊断与 Web 切换场序时不再二次复制。场序（采样先后）与像素
+   行位置仍是两个独立概念，输出场序与时间戳语义不变。
+2. **运动判断留在 uint8 域**：同位置场差分原先把两场各转一次 int16 再转
+   float；现仅保留一次 int16 减法，绝对差（必在 0..255）收进 uint8，亮度均值
+   用 uint16 累加。两个阈值（像素差分 + 3×3 邻域）与输入完全相同，运动掩膜
+   逐位等价，细线与运动边缘仍按原准则校验。
+3. **重建每个输出行只写一次**：旧实现先各建一整帧空间插值与时间 weave，再用
+   `np.where` 合并（每行被写两遍）。现在场自身的行直接落位，缺失行仅按掩膜在
+   “空间均值 / 异位置场 weave”间二选一，不再生成两个完整临时帧。不跳过任何
+   场、不降低分辨率——任何跳帧或缩帧都会被一致性断言拦下。
+
+### 9.2 成本分解与性能集（`core/perf.py`，CLI `perf`）
+
+- 负载一 `thin_line_motion`：1 px 细竖线与高频棋盘格逐场移动，最大化细线运动
+  与运动边缘判决压力；
+- 负载二 `field_order_switch`：同一真值分别按 TFF/BFF 采集，加压场序变化与
+  行复用路径。
+- 每个负载在**相同输入**上跑冻结旧路径与加速路径，按 `split / motion /
+  reconstruct` 分阶段计时，报告每帧秒数、总加速比与重建帧**梳齿误差**；
+  计时采用 best-of-N 墙钟。
+- 先断言后计时：帧数、分辨率、逐像素、掩膜、时间戳任一不一致即抛错失败，
+  梳齿误差若高于旧路径同样失败。指标不允许用默认值遮错——零耗时会直接使
+  断言失败，报告里的每个数字都对应一次真实执行。
+
+实测（288×384、60 隔行帧 → 120 重建帧，`output/perf/field_processing_perf.json`）：
+三条负载均 `parity=exact`、梳齿误差新旧完全相同，总耗时约 1.15–1.18×。
+
+### 9.3 回退准则
+
+若发现梳齿误差或每帧成本之外的任何行为退化（像素、掩膜、帧数、帧率、时长、
+场序语义），撤回对应优化：`pipeline.run(..., accelerated=False)` 即切回
+`core.legacy` 的冻结构建器，无需改调用方。
+
+## 10. 目录结构
 
 ```
 archive_deinterlacer/
 ├── core/
 │   ├── ffmpeg_io.py    # ffmpeg 进程、元数据解析、流式编解码
-│   ├── fields.py       # 场分离/采样时刻/bob/weave/运动掩膜/自适应重建
-│   ├── diagnostics.py  # 梳齿、场序推断、逐行识别、阻断式诊断
-│   ├── pipeline.py     # 模式编排、时间戳一致性、导出清单
+│   ├── fields.py       # 场分离/采样时刻/bob/weave/运动掩膜/自适应重建 + 加速原语
+│   ├── diagnostics.py  # 梳齿、场序推断、逐行识别、阻断式诊断（单行副本双场序复用）
+│   ├── pipeline.py     # 模式编排、时间戳一致性、导出清单（accelerated 开关）
+│   ├── legacy.py       # 冻结的加速前自适应构建器：性能基准与回退参照
+│   ├── perf.py         # 场处理加速性能集：成本分解/梳齿误差/每帧成本/一致性闸门
 │   ├── synthetic.py    # 四类图案的真值与隔行采集模拟
 │   └── benchmark.py    # 三指标量化对比 + 模糊基线
 ├── web/                # Flask 编排层（无算法），含模板与原生 JS 界面
-├── cli.py              # generate/diagnose/deinterlace/benchmark/serve
-└── tests/              # 内核语义测试 + ffmpeg/HTTP 端到端测试
+├── cli.py              # generate/diagnose/deinterlace/benchmark/perf/serve
+└── tests/              # 内核语义、加速一致性、ffmpeg/HTTP 端到端测试
 ```
 
-## 10. 测试
+## 11. 测试
 
 ```bash
 python3 -m unittest discover -s archive_deinterlacer/tests
 ```
 
 覆盖场序与行位置语义、场时间戳、三种模式的帧数/帧率/时长不变量、奇数高度与无
-场序拒绝、梳齿检测、合成片往返、逐行片拒绝，以及完整 Web API 工作流。
+场序拒绝、梳齿检测、合成片往返、逐行片拒绝、完整 Web API 工作流，以及加速
+专项：可复用分离等价、uint8 运动掩膜逐位等价、新旧管线精确一致、性能集注入
+退化（改像素/丢帧）时闸门必须失败。

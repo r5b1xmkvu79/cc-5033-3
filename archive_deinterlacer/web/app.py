@@ -155,7 +155,10 @@ def field_frame(job_id, field_index):
     order = request.args.get("order", job.active_order or F.TFF)
     if order not in (F.TFF, F.BFF):
         return jsonify({"ok": False, "error": "bad order parameter"}), 400
-    samples = list(F.split_stream(iter(job.frames), order))
+    try:
+        samples = job.samples_for_order(order)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     if not 0 <= field_index < len(samples):
         return jsonify({"ok": False, "error": "field index out of range"}), 404
     display = F.bob_reconstruct(samples[field_index])
@@ -206,10 +209,17 @@ def download_manifest(job_id):
 
 
 def create_app(work_root: Path) -> "FlaskApp":
-    from flask import Flask
+    from flask import Flask, jsonify
 
     work_root = Path(work_root).resolve()
     app = Flask(__name__)
     app.register_blueprint(bp)
+
+    @app.errorhandler(KeyError)
+    def _unknown_job(exc):
+        # Every unknown job id must reach the UI as a structured error, never
+        # as an HTML 500 page the JS cannot render in its status area.
+        return jsonify({"ok": False, "error": "unknown job id"}), 404
+
     init_store(work_root)
     return app

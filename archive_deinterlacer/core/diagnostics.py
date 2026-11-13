@@ -67,6 +67,30 @@ def order_temporal_score(samples: list[F.FieldSample]) -> float:
     return float(np.mean(diffs)) if diffs else 0.0
 
 
+def _samples_for_both_orders(
+    raw_frames: list[np.ndarray],
+) -> tuple[list[F.FieldSample], list[F.FieldSample]]:
+    """Split every frame once and reuse the copied rows for both order reads.
+
+    TFF and BFF contain the same two fields per frame in opposite capture
+    order. Splitting twice re-copied every row; here the top/bottom row arrays
+    are produced once and the BFF samples wrap the same arrays with swapped
+    capture indices, so field order and timing stay exactly as before.
+    """
+    tff_samples = F.split_fields_reusable(iter(raw_frames), F.TFF)
+    bff_samples: list[F.FieldSample] = []
+    for frame_index in range(len(raw_frames)):
+        top = tff_samples[2 * frame_index]
+        bottom = tff_samples[2 * frame_index + 1]
+        bff_samples.append(
+            F.FieldSample(frame_index * 2, frame_index, F.BOTTOM, bottom.data)
+        )
+        bff_samples.append(
+            F.FieldSample(frame_index * 2 + 1, frame_index, F.TOP, top.data)
+        )
+    return tff_samples, bff_samples
+
+
 def _samples_for_order(
     raw_frames: list[np.ndarray], order: str
 ) -> list[F.FieldSample]:
@@ -74,7 +98,9 @@ def _samples_for_order(
 
 
 def detect_progressive(
-    raw_frames: list[np.ndarray], samples: list[F.FieldSample]
+    raw_frames: list[np.ndarray],
+    samples: list[F.FieldSample],
+    comb_values: list[float] | None = None,
 ) -> tuple[float, float]:
     """Return (progressive_score, same_position_temporal_residual).
 
@@ -84,11 +110,17 @@ def detect_progressive(
     time. Real interlaced motion makes that residual large. Comb energy alone
     is unreliable here because 4:2:0 chroma subsampling creates fake teeth on
     sharp vertical edges of an actually progressive frame.
+
+    ``comb_values`` reuses the per-frame comb energies already computed by
+    ``diagnose``; when absent they are computed locally so standalone callers
+    keep working.
     """
     if len(raw_frames) < 3:
         return 0.0, 0.0
 
-    comb = np.mean([comb_energy(fr) for fr in raw_frames])
+    if comb_values is None:
+        comb_values = [comb_energy(fr) for fr in raw_frames]
+    comb = float(np.mean(comb_values))
     comb_term = float(np.clip(1.0 - comb / 4.0, 0.0, 1.0))
 
     by_position: dict[str, list[F.FieldSample]] = {F.TOP: [], F.BOTTOM: []}
@@ -124,12 +156,12 @@ def diagnose(
     mean_comb = float(np.mean(comb_values))
     comb_ratio = float(np.mean([c > comb_threshold for c in comb_values]))
 
-    tff_samples = _samples_for_order(raw_frames, F.TFF)
-    bff_samples = _samples_for_order(raw_frames, F.BFF)
+    # One row-copy pass; BFF reuses TFF's field row arrays.
+    tff_samples, bff_samples = _samples_for_both_orders(raw_frames)
     score_tff = order_temporal_score(tff_samples)
     score_bff = order_temporal_score(bff_samples)
     progressive_score, same_position_residual = detect_progressive(
-        raw_frames, tff_samples
+        raw_frames, tff_samples, comb_values
     )
 
     reasons: list[str] = []

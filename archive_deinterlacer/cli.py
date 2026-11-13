@@ -91,6 +91,17 @@ def cmd_benchmark(args) -> int:
     return 0
 
 
+def cmd_perf(args) -> int:
+    from .core.perf import run_suite
+
+    out = Path(args.out)
+    report = run_suite(out)
+    report_path = report.pop("report_path", None)
+    print(f"field-processing perf report: {report_path}", file=sys.stderr)
+    _print(report)
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .web.app import create_app
 
@@ -131,6 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("benchmark", help="score modes against synthetic ground truth")
     p.add_argument("--out", default="output/benchmark")
     p.set_defaults(func=cmd_benchmark)
+
+    p = sub.add_parser(
+        "perf",
+        help="field-processing acceleration A/B: stage cost, comb error, per-frame cost",
+    )
+    p.add_argument("--out", default="output/perf")
+    p.set_defaults(func=cmd_perf)
 
     p = sub.add_parser("serve", help="start the web correction interface")
     p.add_argument("--host", default="127.0.0.1")

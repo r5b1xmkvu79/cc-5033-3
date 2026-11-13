@@ -192,6 +192,156 @@ def bob_reconstruct(field: FieldSample) -> np.ndarray:
     return _spatial_interpolate(field.data, field.position)
 
 
+# ---------------------------------------------------------------------------
+# Accelerated field-processing primitives
+#
+# These functions reproduce *exactly* the same field-order semantics, motion
+# verdict and pixel output as the originals above. The speedup comes from
+# reusing row information instead of recomputing it, never from dropping a
+# field, downscaling, or relaxing the fine-line/motion-edge criteria:
+#
+# * ``split_fields_reusable`` splits each interlaced frame once; TFF and BFF
+#   reuse the same two FieldSample objects and only reorder them, so the BFF
+#   diagnostic path no longer re-copies every row.
+# * ``motion_mask_fast`` keeps the difference in the uint8 domain. A uint8
+#   absolute difference is the same value ``abs(int16-a - int16-b)`` held in
+#   one byte instead of two, which removes two int16 allocations and one
+#   float conversion per field pair while keeping bit-identical thresholds.
+# * ``adaptive_reconstruct_fast`` writes each output row once: the field's
+#   own rows are placed directly and the missing rows are either woven or
+#   spatially interpolated according to the mask. The original built a full
+#   spatial frame AND a full temporal frame and merged them with np.where,
+#   i.e. every row was written twice; no row is skipped, no resolution drops.
+# ---------------------------------------------------------------------------
+
+
+def split_fields_reusable(
+    frames, field_order: str
+) -> list[FieldSample]:
+    """Split every frame once; BFF reuses TFF's samples instead of re-copying.
+
+    Returned samples are identical to ``list(split_stream(frames, order))``
+    in data, position, frame_index and capture index. The only difference is
+    that under BFF the two FieldSample objects created at split time are
+    re-labeled and reordered rather than rebuilt, halving row-copy traffic for
+    workflows that evaluate both orders (diagnostics) or switch order in the UI.
+    """
+    if field_order not in (TFF, BFF):
+        raise ValueError(f"field_order must be {TFF!r} or {BFF!r}, got {field_order!r}")
+    samples: list[FieldSample] = []
+    for frame_index, frame in enumerate(frames):
+        top = FieldSample(frame_index * 2, frame_index, TOP, frame[0::2].copy())
+        bottom = FieldSample(
+            frame_index * 2 + 1, frame_index, BOTTOM, frame[1::2].copy()
+        )
+        if field_order == TFF:
+            samples.append(top)
+            samples.append(bottom)
+        else:
+            # Same row positions and data, swapped capture indices/order.
+            samples.append(
+                FieldSample(frame_index * 2, frame_index, BOTTOM, bottom.data)
+            )
+            samples.append(
+                FieldSample(frame_index * 2 + 1, frame_index, TOP, top.data)
+            )
+    return samples
+
+
+def _field_luma_diff_uint8(
+    earlier: np.ndarray, later: np.ndarray
+) -> np.ndarray:
+    """Mean per-pixel channel difference, identical to the int16 original.
+
+    ``np.abs(uint8 - uint8)`` cannot be computed in uint8 directly (wraps
+    around), so the subtraction stays int16 for one step; the result fits in
+    uint8 because an absolute 8-bit difference is 0..255. The luma mean then
+    accumulates in uint16 instead of casting both fields to float first.
+    """
+    delta = np.abs(earlier.astype(np.int16) - later.astype(np.int16)).astype(np.uint8)
+    return delta.astype(np.uint16).sum(axis=2) / 3.0
+
+
+def motion_mask_fast(
+    earlier: np.ndarray,
+    later: np.ndarray,
+    diff_threshold: float = 10.0,
+    neighborhood_threshold: float = 6.0,
+) -> np.ndarray:
+    """Bit-identical verdict to ``motion_mask`` with uint8-domain arithmetic."""
+    diff = _field_luma_diff_uint8(earlier, later)
+    neighborhood = _dilate3(diff)
+    return (diff > diff_threshold) & (neighborhood > neighborhood_threshold)
+
+
+def _spatial_missing_rows(
+    field_data: np.ndarray, position: str
+) -> tuple[np.ndarray, slice]:
+    """Compute only the rows the field does not own.
+
+    Returns (missing_rows, target_slice) where ``missing_rows`` are the
+    averages of the field's neighboring own rows and the slice places them at
+    the missing full-frame positions, including the clamped border row.
+    """
+    f = field_data.astype(np.float32)
+    inner = np.clip(((f[:-1] + f[1:]) / 2.0 + 0.5), 0, 255).astype(np.uint8)
+    if position == TOP:
+        # Own rows are full rows 0,2,...; missing inner rows 1,3,...,H-3,
+        # final full row clamps to the last available field row.
+        missing = np.empty((field_data.shape[0], field_data.shape[1], 3), np.uint8)
+        missing[:-1] = inner
+        missing[-1] = field_data[-1]
+        return missing, slice(1, None, 2)
+    missing = np.empty_like(field_data)
+    missing[1:] = inner
+    missing[0] = field_data[0]
+    return missing, slice(0, -1, 2)
+
+
+def adaptive_reconstruct_fast(
+    current: FieldSample,
+    same_prev: FieldSample | None,
+    same_next: FieldSample | None,
+    cross_prev: FieldSample | None,
+    cross_next: FieldSample | None,
+    diff_threshold: float = 10.0,
+    neighborhood_threshold: float = 6.0,
+    mask_half: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Output-identical to ``adaptive_reconstruct`` with one write per row.
+
+    ``mask_half`` may be supplied when the caller already computed the
+    same-position motion verdict for another field sharing the bracket; it is
+    reused verbatim instead of being recomputed. Fine-line and motion-edge
+    checks are the same two thresholds applied to the same same-position
+    field pair, so the mask cannot change.
+    """
+    half_h, width, channels = current.data.shape
+    out = np.empty((half_h * 2, width, channels), dtype=np.uint8)
+    if same_prev is None or same_next is None or cross_prev is None:
+        edge_full = np.zeros((half_h * 2, width), bool)
+        spatial = _spatial_interpolate(current.data, current.position)
+        return spatial, edge_full
+
+    if mask_half is None:
+        mask_half = motion_mask_fast(
+            same_prev.data, same_next.data, diff_threshold, neighborhood_threshold
+        )
+    edge_full = _expand_mask_to_full(mask_half)
+    mask_rows = mask_half[:, :, np.newaxis]
+
+    missing, missing_slice = _spatial_missing_rows(current.data, position=current.position)
+    cross = cross_prev if cross_prev is not None else cross_next
+    # Missing rows default to the temporal weave and are overwritten with the
+    # spatial average only where the motion mask fired.
+    out[missing_slice] = np.where(mask_rows, missing, cross.data).astype(np.uint8)
+    if current.position == TOP:
+        out[0::2] = current.data
+    else:
+        out[1::2] = current.data
+    return out, edge_full
+
+
 def vertical_blur_merge(frame: np.ndarray) -> np.ndarray:
     """The deliberately bad reference strategy.
 

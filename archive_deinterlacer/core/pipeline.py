@@ -75,7 +75,13 @@ class PipelineResult:
         return len(self.records)
 
 
-def _build_adaptive(samples, timestamps, cfg: DeinterlaceConfig) -> tuple[list[FrameRecord], float]:
+def _same_position_index(samples):
+    """Map each field's capture index to its same-position temporal neighbors.
+
+    The motion bracket for a field is the pair of same-row-position fields one
+    full frame period before and after it. Built once from capture order so the
+    reconstruction loop only performs dict lookups instead of rescanning.
+    """
     by_pos: dict[str, list[F.FieldSample]] = {F.TOP: [], F.BOTTOM: []}
     for s in samples:
         by_pos[s.position].append(s)
@@ -86,6 +92,11 @@ def _build_adaptive(samples, timestamps, cfg: DeinterlaceConfig) -> tuple[list[F
                 by_pos[pos][j - 1] if j > 0 else None,
                 by_pos[pos][j + 1] if j + 1 < len(by_pos[pos]) else None,
             )
+    return same_index
+
+
+def _build_adaptive(samples, timestamps, cfg: DeinterlaceConfig) -> tuple[list[FrameRecord], float]:
+    same_index = _same_position_index(samples)
 
     records: list[FrameRecord] = []
     motion_pixels = 0
@@ -94,7 +105,7 @@ def _build_adaptive(samples, timestamps, cfg: DeinterlaceConfig) -> tuple[list[F
         prev_cross = samples[i - 1] if i > 0 else None
         next_cross = samples[i + 1] if i + 1 < len(samples) else None
         same_prev, same_next = same_index[current.position][current.index]
-        rgb, mask = F.adaptive_reconstruct(
+        rgb, mask = F.adaptive_reconstruct_fast(
             current,
             same_prev,
             same_next,
@@ -159,8 +170,15 @@ def run(
     frames: list[np.ndarray],
     source_fps: float,
     cfg: DeinterlaceConfig,
+    accelerated: bool = True,
 ) -> PipelineResult:
-    """Run the configured reconstruction on decoded interlaced frames."""
+    """Run the configured reconstruction on decoded interlaced frames.
+
+    ``accelerated=True`` (default) uses the row-reuse field pipeline, which is
+    asserted pixel-identical to the frozen reference in ``core.legacy``. Pass
+    ``False`` to run the pre-acceleration builder; the performance suite uses
+    this as its baseline and it doubles as the rollback switch.
+    """
     cfg.validate()
     if source_fps <= 0:
         raise ValueError("source fps must be positive")
@@ -169,7 +187,10 @@ def run(
     if frames[0].shape[0] % 2:
         raise ValueError("interlaced frames must have an even height")
 
-    samples = list(F.split_stream(iter(frames), cfg.field_order))
+    if accelerated:
+        samples = F.split_fields_reusable(iter(frames), cfg.field_order)
+    else:
+        samples = list(F.split_stream(iter(frames), cfg.field_order))
     f_ts = F.field_timestamps(len(frames), source_fps)
 
     if cfg.mode == MODE_WEAVE:
@@ -182,7 +203,12 @@ def run(
         motion_ratio = 0.0
     else:
         output_fps = 2.0 * source_fps
-        records, motion_ratio = _build_adaptive(samples, f_ts, cfg)
+        if accelerated:
+            records, motion_ratio = _build_adaptive(samples, f_ts, cfg)
+        else:
+            from .legacy import build_adaptive_legacy
+
+            records, motion_ratio = build_adaptive_legacy(samples, f_ts, cfg)
 
     expected_duration = records[-1].timestamp + 1.0 / output_fps if records else 0.0
     return PipelineResult(

@@ -1,0 +1,112 @@
+{
+  "workloads": [
+    {
+      "workload": "thin_line_motion",
+      "field_order": "tff",
+      "input_interlaced_frames": 60,
+      "output_frames": 120,
+      "output_fps": 50.0,
+      "resolution": [
+        288,
+        384
+      ],
+      "parity": {
+        "frames_checked": 120,
+        "max_pixel_diff": 0,
+        "mask_mismatch_frames": 0,
+        "parity": "exact"
+      },
+      "comb_residue_legacy": 24.259487,
+      "comb_residue_accelerated": 24.259487,
+      "legacy": {
+        "split_seconds_per_frame": 1.5e-05,
+        "motion_seconds_per_frame": 0.000881,
+        "reconstruct_seconds_per_frame": 0.001444,
+        "total_seconds_per_frame": 0.00234
+      },
+      "accelerated": {
+        "split_seconds_per_frame": 1e-05,
+        "motion_seconds_per_frame": 0.00085,
+        "reconstruct_seconds_per_frame": 0.00117,
+        "total_seconds_per_frame": 0.00203
+      },
+      "speedup_total_x": 1.153,
+      "timed_runs": 5,
+      "note": "best-of-N wall time; identical input for both paths; no frame or field was skipped and resolution is unchanged"
+    },
+    {
+      "workload": "field_order_switch_tff",
+      "field_order": "tff",
+      "input_interlaced_frames": 60,
+      "output_frames": 120,
+      "output_fps": 50.0,
+      "resolution": [
+        288,
+        384
+      ],
+      "parity": {
+        "frames_checked": 120,
+        "max_pixel_diff": 0,
+        "mask_mismatch_frames": 0,
+        "parity": "exact"
+      },
+      "comb_residue_legacy": 24.259487,
+      "comb_residue_accelerated": 24.259487,
+      "legacy": {
+        "split_seconds_per_frame": 1.6e-05,
+        "motion_seconds_per_frame": 0.00093,
+        "reconstruct_seconds_per_frame": 0.001418,
+        "total_seconds_per_frame": 0.002363
+      },
+      "accelerated": {
+        "split_seconds_per_frame": 1e-05,
+        "motion_seconds_per_frame": 0.000838,
+        "reconstruct_seconds_per_frame": 0.001161,
+        "total_seconds_per_frame": 0.002009
+      },
+      "speedup_total_x": 1.1761,
+      "timed_runs": 5,
+      "note": "best-of-N wall time; identical input for both paths; no frame or field was skipped and resolution is unchanged"
+    },
+    {
+      "workload": "field_order_switch_bff",
+      "field_order": "bff",
+      "input_interlaced_frames": 60,
+      "output_frames": 120,
+      "output_fps": 50.0,
+      "resolution": [
+        288,
+        384
+      ],
+      "parity": {
+        "frames_checked": 120,
+        "max_pixel_diff": 0,
+        "mask_mismatch_frames": 0,
+        "parity": "exact"
+      },
+      "comb_residue_legacy": 24.259487,
+      "comb_residue_accelerated": 24.259487,
+      "legacy": {
+        "split_seconds_per_frame": 1.7e-05,
+        "motion_seconds_per_frame": 0.000898,
+        "reconstruct_seconds_per_frame": 0.001433,
+        "total_seconds_per_frame": 0.002348
+      },
+      "accelerated": {
+        "split_seconds_per_frame": 1e-05,
+        "motion_seconds_per_frame": 0.000881,
+        "reconstruct_seconds_per_frame": 0.001175,
+        "total_seconds_per_frame": 0.002066
+      },
+      "speedup_total_x": 1.1364,
+      "timed_runs": 5,
+      "note": "best-of-N wall time; identical input for both paths; no frame or field was skipped and resolution is unchanged"
+    }
+  ],
+  "metrics": {
+    "seconds_per_frame": "lower is faster; decomposed by processing stage",
+    "comb_residue": "0 means no interlace comb teeth on reconstructed frames",
+    "speedup_total_x": "legacy total time divided by accelerated total time",
+    "parity": "exact pixel/mask/timestamp equality is asserted before timing"
+  }
+}

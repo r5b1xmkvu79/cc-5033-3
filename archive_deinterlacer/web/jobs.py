@@ -25,11 +25,27 @@ class Job:
     diagnosis: dict | None = None
     frames: list = field(default_factory=list)          # raw interlaced frames
     field_samples: list = field(default_factory=list)   # FieldSample per order
+    _field_cache: dict = field(default_factory=dict)    # order -> split samples
     active_order: str | None = None
     result: object = None
     manifest: dict | None = None
     manifest_path: str | None = None
     output_path: str | None = None
+
+    def samples_for_order(self, order: str):
+        """Split the decoded rows once per order; UI re-ordering reuses them.
+
+        The cache wraps :func:`fields.split_fields_reusable`, so switching the
+        operator's TFF/BFF selection never re-copies the field rows, while the
+        returned samples remain real, freshly computed FieldSample objects.
+        """
+        if order not in (F.TFF, F.BFF):
+            raise ValueError(f"field order must be 'tff' or 'bff', got {order!r}")
+        if order not in self._field_cache:
+            self._field_cache[order] = F.split_fields_reusable(
+                iter(self.frames), order
+            )
+        return self._field_cache[order]
 
 
 class JobStore:
