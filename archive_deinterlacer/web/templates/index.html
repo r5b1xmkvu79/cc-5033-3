@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>电视档案去交错工作台</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>电视档案去交错工作台</h1>
+  <p class="sub">场序显式选择 · 场采样时刻可查 · 内核驱动控件，拒绝猜测</p>
+</header>
+
+<main>
+  <section class="card" id="upload-card">
+    <h2>1. 上传隔行视频</h2>
+    <input type="file" id="file" accept="video/*">
+    <button id="upload-btn">上传并诊断</button>
+    <div id="upload-status" class="status"></div>
+  </section>
+
+  <section class="card hidden" id="meta-card">
+    <h2>2. 输入诊断</h2>
+    <table id="meta-table"></table>
+    <h3>诊断结论</h3>
+    <div id="diagnosis-box"></div>
+    <ul id="reasons"></ul>
+  </section>
+
+  <section class="card hidden" id="control-card">
+    <h2>3. 去交错设置（由档案去交错内核驱动）</h2>
+    <div class="row">
+      <label>场序（上场先后 ≠ 像素行位置）：
+        <select id="field-order">
+          <option value="">— 必须显式选择，不自动猜测 —</option>
+          <option value="tff">TFF 上场优先（top field first，先采样偶数行）</option>
+          <option value="bff">BFF 下场优先（bottom field first，先采样奇数行）</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>重建策略：
+        <select id="mode">
+          {% for m in modes %}
+          <option value="{{ m }}">{{ m }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="row two-cols">
+      <label>运动差分阈值
+        <input type="number" id="diff-threshold" value="10" min="0" max="255" step="0.5">
+      </label>
+      <label>邻域阈值
+        <input type="number" id="neighborhood-threshold" value="6" min="0" max="255" step="0.5">
+      </label>
+    </div>
+    <button id="process-btn">运行档案去交错并导出</button>
+    <div id="process-status" class="status"></div>
+  </section>
+
+  <section class="card hidden" id="viewer-card">
+    <h2>4. 逐帧对照</h2>
+    <div class="viewer-grid">
+      <figure>
+        <figcaption>原始隔行帧（含梳齿）</figcaption>
+        <img id="raw-img" alt="raw interlaced frame">
+      </figure>
+      <figure>
+        <figcaption>单场视图（当前场，行加倍显示）</figcaption>
+        <img id="field-img" alt="single field">
+      </figure>
+      <figure>
+        <figcaption>最终重建帧
+          <label class="inline"><input type="checkbox" id="motion-overlay"> 叠加运动边缘</label>
+        </figcaption>
+        <img id="result-img" alt="reconstructed frame">
+      </figure>
+    </div>
+    <div class="scrubber">
+      <button id="prev-btn">◀ 上一帧</button>
+      <span id="frame-label">—</span>
+      <button id="next-btn">下一帧 ▶</button>
+    </div>
+    <div id="timing-box" class="timing"></div>
+  </section>
+
+  <section class="card hidden" id="export-card">
+    <h2>5. 交付物（真实导出，非播放器显示效果）</h2>
+    <div id="export-info"></div>
+    <a id="dl-video" class="button">下载处理后 MP4（逐行标记）</a>
+    <a id="dl-manifest" class="button">下载时间戳清单 JSON</a>
+  </section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
